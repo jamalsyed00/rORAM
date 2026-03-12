@@ -1,0 +1,19 @@
+# Build artifacts
+*.o
+*.a
+roram_main
+tests_basic
+
+# Benchmark output
+bench_out/
+*.csv
+
+# Temp/scratch files from file-storage tests
+/tmp/roram_*
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+*.swp

@@ -10,9 +10,16 @@ SubORAM::SubORAM(const Params& params, int i, StorageBackend* storage, CryptoPro
     : params_(params), i_(i), storage_(storage), crypto_(crypto),
       pm_(params.N, i), stash_() {}
 
-static void merge_bucket_into_stash(std::vector<Block>& stash, const Bucket& bucket, int oram_index) {
+void SubORAM::merge_bucket_into_stash(std::vector<Block>& stash, const Bucket& bucket) {
+  const uint64_t range_size = 1ULL << i_;
   for (const Block& b : bucket.blocks) {
     if (!b.valid()) continue;
+    // Stale-copy check: discard blocks whose path tag no longer matches the
+    // current position map.  Without this, a block re-assigned to a new path
+    // can leave a ghost copy in the tree that later overwrites the live copy.
+    uint64_t a0     = (b.a / range_size) * range_size;
+    uint64_t offset = b.a - a0;
+    if (b.p[static_cast<size_t>(i_)] != pm_.query(a0) + offset) continue;
     auto it = std::find_if(stash.begin(), stash.end(), [&b](const Block& s) { return s.a == b.a; });
     if (it != stash.end()) continue;  // keep existing (e.g. from higher level)
     stash.push_back(b);
@@ -21,7 +28,7 @@ static void merge_bucket_into_stash(std::vector<Block>& stash, const Bucket& buc
 
 void SubORAM::merge_into_stash(const std::vector<Bucket>& buckets) {
   for (const Bucket& b : buckets)
-    merge_bucket_into_stash(stash_, b, i_);
+    merge_bucket_into_stash(stash_, b);
 }
 
 void SubORAM::read_paths_level(uint64_t p, uint64_t count, int j, std::vector<Bucket>& out) {
@@ -63,6 +70,20 @@ void SubORAM::ReadRange(uint64_t a, std::vector<Block>& result, uint64_t& new_pa
         if (in_result == result.end())
           result.push_back(b);
       }
+    }
+  }
+
+  // Synthesize zero-initialized blocks for any address in [a, U_end) not yet found.
+  // Mirrors PathORAM's "create block on first access" behaviour.
+  // Set p[i_] correctly so the stale-copy check passes on subsequent BatchEvict merges.
+  for (uint64_t addr = a; addr < U_end; ++addr) {
+    auto in_result = std::find_if(result.begin(), result.end(),
+                                  [addr](const Block& b) { return b.a == addr; });
+    if (in_result == result.end()) {
+      Block b(params_.B, params_.ell + 1);
+      b.a = addr;
+      b.p[static_cast<size_t>(i_)] = new_path_start + (addr - a);
+      result.push_back(b);
     }
   }
 
@@ -114,7 +135,15 @@ void SubORAM::BatchEvict(uint64_t k, uint64_t cnt) {
       for (size_t z = chosen.size(); z < static_cast<size_t>(Z); ++z)
         to_write[i].blocks[z].set_dummy();
     }
-    storage_->write_buckets(j, start, to_write);
+    if (start + num_needed <= n_buckets) {
+      storage_->write_buckets(j, start, to_write);
+    } else {
+      uint64_t first_count = n_buckets - start;
+      std::vector<Bucket> part1(to_write.begin(), to_write.begin() + static_cast<ptrdiff_t>(first_count));
+      std::vector<Bucket> part2(to_write.begin() + static_cast<ptrdiff_t>(first_count), to_write.end());
+      storage_->write_buckets(j, start, part1);
+      storage_->write_buckets(j, 0, part2);
+    }
   }
 }
 
