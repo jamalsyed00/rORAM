@@ -11,6 +11,7 @@ set(RORAM_SOURCES
   src/storage_file.cpp
   src/sub_oram.cpp
   src/roram.cpp
+  src/path_oram.cpp
 )
 
 add_library(roram ${RORAM_SOURCES})
@@ -25,3 +26,7 @@ endif()
 add_executable(roram_main src/main.cpp)
 target_link_libraries(roram_main PRIVATE roram)
 target_include_directories(roram_main PRIVATE include)
+
+add_executable(tests_basic tests/basic_tests.cpp)
+target_link_libraries(tests_basic PRIVATE roram)
+target_include_directories(tests_basic PRIVATE include)

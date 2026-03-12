@@ -5,17 +5,36 @@ C++ implementation of **rORAM: Efficient Range ORAM with O(log² N) Locality** (
 ## Features
 
 - **Core rORAM**: ℓ+1 Path-ORAM–style sub-ORAMs (R₀…R_ℓ), bit-reversed tree layout, locality-sensitive block mapping, distributed position map
+- **Path ORAM baseline**: dedicated `PathORAM` implementation (`L=1`) with explicit position map + stash
 - **Storage**: In-memory and file-backed backends with optional seek counting
+- **Crypto boundary**: bucket-level crypto hooks at storage serialization boundary (NoOp by default, OpenSSL AES-GCM when enabled)
 - **CLI**: init, read, write, bench, and **rORAM vs Path ORAM** comparison with seek penalty and CSV output
 
 ## Build
 
 ```bash
 make          # builds libroram.a and roram_main
+make tests_basic
 make clean    # remove object files and binaries
 ```
 
 Requires a C++17 compiler. Optional: use CMake via `CMakeLists.txt`.
+
+### OpenSSL Build (AES-GCM + auth-tag tests)
+
+Prerequisites (macOS/Homebrew):
+
+```bash
+brew install cmake openssl
+```
+
+```bash
+cmake -S . -B build/openssl -DRORAM_USE_OPENSSL=ON -DOPENSSL_ROOT_DIR="$(brew --prefix openssl)"
+cmake --build build/openssl -j
+./build/openssl/tests_basic
+```
+
+If OpenSSL is not found, install development headers/libraries and re-run CMake.
 
 ## Usage
 
@@ -42,7 +61,28 @@ Requires a C++17 compiler. Optional: use CMake via `CMakeLists.txt`.
 
 **Options**: `--N`, `--L`, `--trials`, `--seek-penalty-us`, `--file`, `--csv`
 
-Output columns: `range_size`, `scheme`, `total_ms`, `time_per_block_ms`, `mean_seeks`, `ci_low`, `ci_high`.
+Output columns: `range_size`, `scheme`, `mean_ms`, `p50_ms`, `p95_ms`, `time_per_block_ms`, `logical_B`, `mean_seeks`, `ci_low`, `ci_high`.
+
+## Tests
+
+```bash
+make roram_main tests_basic
+./tests_basic
+```
+
+## Benchmark Matrix (RAM / SSD / HDD)
+
+Use the script below to produce advisor-ready CSVs for multiple media:
+
+```bash
+./scripts/benchmark_matrix.sh \
+  --N 65536 --L 8192 --trials 5 --seek-penalty-us 50 \
+  --outdir bench_out \
+  --ssd-path /Volumes/YourSSD/roram_bench \
+  --hdd-path /Volumes/YourHDD/roram_bench
+```
+
+For RAM-only runs, omit `--ssd-path` and `--hdd-path`.
 
 ## Layout
 
