@@ -12,6 +12,7 @@ Implementation files and CLI for the rORAM C++ project.
 | **position_map.cpp** | `PositionMap` query/update by range start |
 | **storage_mem.cpp** | `MemoryStorage` – in-memory buckets, seek counting |
 | **storage_file.cpp** | `FileStorage` – file-backed buckets, optional seek counting |
+| **path_oram.cpp** | `PathORAM` baseline (`L=1`) access, stash, position map, greedy eviction |
 | **sub_oram.cpp** | `SubORAM::ReadRange`, `SubORAM::BatchEvict`, stash merge |
 | **roram.cpp** | `rORAM` constructor, `Access()` (two ReadRanges + BatchEvict on all trees) |
 | **main.cpp** | CLI: init, read, write, bench, compare (rORAM vs Path ORAM) |

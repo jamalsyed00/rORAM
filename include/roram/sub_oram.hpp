@@ -36,6 +36,7 @@ class SubORAM {
   std::vector<Block> stash_;
 
   uint64_t num_buckets_at_level(int j) const { return 1ULL << j; }
+  void merge_bucket_into_stash(std::vector<Block>& stash, const Bucket& bucket);
   void read_paths_level(uint64_t p, uint64_t count, int j, std::vector<Bucket>& out);
   void write_paths_level(uint64_t cnt, uint64_t k, int j, const std::vector<Bucket>& buckets);
 };

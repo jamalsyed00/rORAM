@@ -1,4 +1,5 @@
 #include "roram/roram.hpp"
+#include "roram/path_oram.hpp"
 #include "roram/types.hpp"
 #include "roram/crypto.hpp"
 #include "roram/storage.hpp"
@@ -10,6 +11,7 @@
 #include <vector>
 #include <cmath>
 #include <string>
+#include <algorithm>
 
 static void usage(const char* prog) {
   std::cerr << "Usage: " << prog << " <init|read|write|bench|compare> [options]\n"
@@ -21,11 +23,11 @@ static void usage(const char* prog) {
             << "          - rORAM vs Path ORAM; use --seek-penalty-us to simulate seek cost (crossover)\n";
 }
 
-// Path ORAM: range read as r sequential Access(addr, 1, "read"). Returns total time in ms.
-static double path_oram_range_read_ms(roram::rORAM& ram, uint64_t a, uint64_t r) {
+// Path ORAM: range read as r sequential Access(addr, "read"). Returns total time in ms.
+static double path_oram_range_read_ms(roram::PathORAM& ram, uint64_t a, uint64_t r) {
   auto start = std::chrono::high_resolution_clock::now();
   for (uint64_t i = 0; i < r; ++i)
-    ram.Access(a + i, 1, "read");
+    ram.Access(a + i, "read");
   auto end = std::chrono::high_resolution_clock::now();
   return std::chrono::duration<double, std::milli>(end - start).count();
 }
@@ -42,6 +44,19 @@ static void mean_std_ci(const std::vector<double>& samples, double& mean, double
   const double ci_half = (n > 0) ? (1.96 * std_dev / std::sqrt(static_cast<double>(n))) : 0;
   ci_low = mean - ci_half;
   ci_high = mean + ci_half;
+}
+
+static double percentile(std::vector<double> samples, double p) {
+  if (samples.empty()) return 0.0;
+  if (p <= 0.0) p = 0.0;
+  if (p >= 1.0) p = 1.0;
+  std::sort(samples.begin(), samples.end());
+  double idx = p * (samples.size() - 1);
+  size_t lo = static_cast<size_t>(std::floor(idx));
+  size_t hi = static_cast<size_t>(std::ceil(idx));
+  if (lo == hi) return samples[lo];
+  double frac = idx - lo;
+  return samples[lo] * (1.0 - frac) + samples[hi] * frac;
 }
 
 int main_init(int argc, char** argv) {
@@ -138,7 +153,7 @@ static int main_compare(int argc, char** argv) {
   auto crypto1 = std::make_unique<roram::NoOpCrypto>();
   auto crypto2 = std::make_unique<roram::NoOpCrypto>();
   roram::rORAM ram_roram(params_roram, std::move(crypto1), !use_file, use_file ? (file_path + "_roram") : "", count_seeks);
-  roram::rORAM ram_path(params_path, std::move(crypto2), !use_file, use_file ? (file_path + "_path") : "", count_seeks);
+  roram::PathORAM ram_path(params_path, std::move(crypto2), !use_file, use_file ? (file_path + "_path") : "", count_seeks);
 
   const int max_exp = std::min(params_roram.ell, 14);
   std::cout << "Compare rORAM vs Path ORAM  N=" << N << " L=" << L << " trials=" << trials;
@@ -146,14 +161,15 @@ static int main_compare(int argc, char** argv) {
   std::cout << "\n";
   std::cout << std::string(120, '-') << "\n";
   std::cout << std::setw(12) << "range_size" << std::setw(12) << "scheme"
-            << std::setw(16) << "total_ms" << std::setw(20) << "time_per_block_ms"
+            << std::setw(14) << "mean_ms" << std::setw(12) << "p50_ms" << std::setw(12) << "p95_ms"
+            << std::setw(20) << "time_per_block_ms" << std::setw(14) << "logical_B"
             << std::setw(14) << "mean_seeks" << std::setw(12) << "ci_low" << std::setw(12) << "ci_high" << "\n";
   std::cout << std::string(120, '-') << "\n";
 
   std::ofstream csv;
   if (!csv_path.empty()) {
     csv.open(csv_path);
-    if (csv) csv << "scheme,range_exp,range_size,mean_ms,std_ms,time_per_block_ms,mean_seeks,ci_low,ci_high\n";
+    if (csv) csv << "scheme,range_exp,range_size,mean_ms,p50_ms,p95_ms,std_ms,time_per_block_ms,logical_bytes,mean_seeks,ci_low,ci_high\n";
   }
 
   for (int exp = 0; exp <= max_exp; ++exp) {
@@ -191,6 +207,11 @@ static int main_compare(int argc, char** argv) {
     mean_std_ci(times_path, mean_p, std_p, ci_lo_p, ci_hi_p);
     const double per_block_r = r_size > 0 ? mean_r / r_size : 0;
     const double per_block_p = r_size > 0 ? mean_p / r_size : 0;
+    const double p50_r = percentile(times_roram, 0.50);
+    const double p95_r = percentile(times_roram, 0.95);
+    const double p50_p = percentile(times_path, 0.50);
+    const double p95_p = percentile(times_path, 0.95);
+    const uint64_t logical_bytes = r_size * static_cast<uint64_t>(B);
     uint64_t mean_seeks_r = 0, mean_seeks_p = 0;
     for (size_t i = 0; i < seeks_roram.size(); ++i) { mean_seeks_r += seeks_roram[i]; }
     for (size_t i = 0; i < seeks_path.size(); ++i) { mean_seeks_p += seeks_path[i]; }
@@ -198,14 +219,18 @@ static int main_compare(int argc, char** argv) {
     mean_seeks_p = (trials > 0) ? (mean_seeks_p + trials / 2) / trials : 0;
     std::cout << std::setw(12) << r_size << std::setw(12) << "rORAM"
               << std::fixed << std::setprecision(3)
-              << std::setw(16) << mean_r << std::setw(20) << per_block_r
+              << std::setw(14) << mean_r << std::setw(12) << p50_r << std::setw(12) << p95_r
+              << std::setw(20) << per_block_r << std::setw(14) << logical_bytes
               << std::setw(14) << mean_seeks_r << std::setw(12) << ci_lo_r << std::setw(12) << ci_hi_r << "\n";
     std::cout << std::setw(12) << r_size << std::setw(12) << "PathORAM"
-              << std::setw(16) << mean_p << std::setw(20) << per_block_p
+              << std::setw(14) << mean_p << std::setw(12) << p50_p << std::setw(12) << p95_p
+              << std::setw(20) << per_block_p << std::setw(14) << logical_bytes
               << std::setw(14) << mean_seeks_p << std::setw(12) << ci_lo_p << std::setw(12) << ci_hi_p << "\n";
     if (csv.is_open()) {
-      csv << "rORAM," << exp << "," << r_size << "," << mean_r << "," << std_r << "," << per_block_r << "," << mean_seeks_r << "," << ci_lo_r << "," << ci_hi_r << "\n";
-      csv << "PathORAM," << exp << "," << r_size << "," << mean_p << "," << std_p << "," << per_block_p << "," << mean_seeks_p << "," << ci_lo_p << "," << ci_hi_p << "\n";
+      csv << "rORAM," << exp << "," << r_size << "," << mean_r << "," << p50_r << "," << p95_r << "," << std_r
+          << "," << per_block_r << "," << logical_bytes << "," << mean_seeks_r << "," << ci_lo_r << "," << ci_hi_r << "\n";
+      csv << "PathORAM," << exp << "," << r_size << "," << mean_p << "," << p50_p << "," << p95_p << "," << std_p
+          << "," << per_block_p << "," << logical_bytes << "," << mean_seeks_p << "," << ci_lo_p << "," << ci_hi_p << "\n";
     }
   }
   if (csv.is_open()) { csv.close(); std::cout << "Wrote " << csv_path << "\n"; }

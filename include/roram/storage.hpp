@@ -2,6 +2,7 @@
 
 #include "roram/types.hpp"
 #include "roram/block.hpp"
+#include "roram/crypto.hpp"
 #include <memory>
 #include <string>
 #include <vector>
@@ -24,17 +25,20 @@ class StorageBackend {
 // In-memory storage: one contiguous buffer per level; optionally counts seeks (non-sequential access)
 class MemoryStorage : public StorageBackend {
  public:
-  MemoryStorage(const Params& params);
+  MemoryStorage(const Params& params, CryptoProvider* crypto = nullptr);
   void read_buckets(int level, uint64_t start_bucket, uint64_t count,
                     std::vector<Bucket>& out) override;
   void write_buckets(int level, uint64_t start_bucket,
                     const std::vector<Bucket>& buckets) override;
-  uint64_t bucket_byte_size() const override { return bucket_byte_size_; }
+  uint64_t bucket_byte_size() const override { return bucket_storage_size_; }
   uint64_t get_seek_count() const override { return seek_count_; }
 
  private:
   Params params_;
-  uint64_t bucket_byte_size_;
+  uint64_t bucket_plain_size_;
+  uint64_t bucket_storage_size_;
+  size_t tag_size_;
+  CryptoProvider* crypto_;
   std::vector<std::vector<uint8_t>> level_data_;
   mutable uint64_t seek_count_{0};
   mutable uint64_t last_offset_{static_cast<uint64_t>(-1)};  // byte after last request
@@ -44,18 +48,22 @@ class MemoryStorage : public StorageBackend {
 // File-backed storage: single file or one file per level; optional seek counting
 class FileStorage : public StorageBackend {
  public:
-  FileStorage(const Params& params, const std::string& path, bool count_seeks = false);
+  FileStorage(const Params& params, const std::string& path, bool count_seeks = false,
+              CryptoProvider* crypto = nullptr);
   ~FileStorage();
   void read_buckets(int level, uint64_t start_bucket, uint64_t count,
                     std::vector<Bucket>& out) override;
   void write_buckets(int level, uint64_t start_bucket,
                     const std::vector<Bucket>& buckets) override;
-  uint64_t bucket_byte_size() const override { return bucket_byte_size_; }
+  uint64_t bucket_byte_size() const override { return bucket_storage_size_; }
   uint64_t get_seek_count() const override { return seek_count_; }
 
  private:
   Params params_;
-  uint64_t bucket_byte_size_;
+  uint64_t bucket_plain_size_;
+  uint64_t bucket_storage_size_;
+  size_t tag_size_;
+  CryptoProvider* crypto_;
   std::string path_;
   bool count_seeks_;
   mutable uint64_t seek_count_;

@@ -12,6 +12,7 @@ Public API and core types for the rORAM C++ implementation.
 | **storage.hpp** | `StorageBackend`, `MemoryStorage`, `FileStorage` (read/write buckets, seek count) |
 | **position_map.hpp** | `PositionMap` – maps range start to leaf index per sub-ORAM |
 | **crypto.hpp** | `CryptoProvider`, `NoOpCrypto`; optional OpenSSL impl behind `RORAM_USE_OPENSSL` |
+| **path_oram.hpp** | `PathORAM` baseline API (`Access(block_id, op, data)`) |
 | **sub_oram.hpp** | `SubORAM` – `ReadRange(a)`, `BatchEvict(k)`, stash, position map for one tree R_i |
 | **roram.hpp** | `rORAM` – `Access(a, r, op, D)`, `get_seek_count()`, ℓ+1 sub-ORAMs |
 

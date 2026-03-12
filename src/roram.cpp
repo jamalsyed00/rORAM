@@ -14,10 +14,11 @@ rORAM::rORAM(const Params& params, std::unique_ptr<CryptoProvider> crypto,
   sub_orams_.reserve(static_cast<size_t>(num_orams));
   for (int i = 0; i < num_orams; ++i) {
     if (use_memory_storage) {
-      storages_.push_back(std::make_unique<MemoryStorage>(params_));
+      storages_.push_back(std::make_unique<MemoryStorage>(params_, crypto_.get()));
     } else {
       if (file_path.empty()) throw std::runtime_error("rORAM: file_path required for file storage");
-      storages_.push_back(std::make_unique<FileStorage>(params_, file_path + "_tree" + std::to_string(i), count_seeks));
+      storages_.push_back(std::make_unique<FileStorage>(params_, file_path + "_tree" + std::to_string(i),
+                                                        count_seeks, crypto_.get()));
     }
     sub_orams_.push_back(std::make_unique<SubORAM>(params_, i, storages_.back().get(), crypto_.get()));
   }
@@ -53,6 +54,15 @@ std::vector<std::vector<uint8_t>> rORAM::Access(uint64_t a, uint64_t r, const st
   std::sort(all_blocks.begin(), all_blocks.end(), [](const Block& x, const Block& y) { return x.a < y.a; });
 
   for (Block& b : all_blocks) {
+    // Keep path tags consistent across all sub-ORAMs, not only the active one.
+    // This prevents stale copies from later being treated as current during merges.
+    for (int j = 0; j <= params_.ell; ++j) {
+      const uint64_t len_j = 1ULL << j;
+      const uint64_t start_j = (b.a / len_j) * len_j;
+      const uint64_t base_j = sub_orams_[static_cast<size_t>(j)]->position_map().query(start_j);
+      b.p[static_cast<size_t>(j)] = base_j + (b.a - start_j);
+    }
+    // Active level gets freshly sampled path starts from this access.
     if (b.a >= a0 && b.a < a0 + range_size)
       b.p[static_cast<size_t>(i)] = p0_prime + (b.a - a0);
     else if (b.a >= a1 && b.a < a1 + range_size)
