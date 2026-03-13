@@ -2,6 +2,7 @@
 #include "roram/bit_reverse.hpp"
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstring>
 
 namespace roram {
@@ -51,9 +52,13 @@ void SubORAM::ReadRange(uint64_t a, std::vector<Block>& result, uint64_t& new_pa
   const uint64_t U_end = a + range_len;
 
   result.clear();
+  std::unordered_set<uint64_t> seen;
+  seen.reserve(static_cast<size_t>(range_len) * 2 + 8);
   for (const Block& b : stash_) {
-    if (b.a >= a && b.a < U_end)
+    if (b.a >= a && b.a < U_end) {
       result.push_back(b);
+      seen.insert(b.a);
+    }
   }
 
   uint64_t p = pm_.query(a);
@@ -66,9 +71,10 @@ void SubORAM::ReadRange(uint64_t a, std::vector<Block>& result, uint64_t& new_pa
     for (const Bucket& bucket : buckets) {
       for (const Block& b : bucket.blocks) {
         if (!b.valid() || b.a < a || b.a >= U_end) continue;
-        auto in_result = std::find_if(result.begin(), result.end(), [&b](const Block& r) { return r.a == b.a; });
-        if (in_result == result.end())
+        if (seen.find(b.a) == seen.end()) {
           result.push_back(b);
+          seen.insert(b.a);
+        }
       }
     }
   }
@@ -77,13 +83,12 @@ void SubORAM::ReadRange(uint64_t a, std::vector<Block>& result, uint64_t& new_pa
   // Mirrors PathORAM's "create block on first access" behaviour.
   // Set p[i_] correctly so the stale-copy check passes on subsequent BatchEvict merges.
   for (uint64_t addr = a; addr < U_end; ++addr) {
-    auto in_result = std::find_if(result.begin(), result.end(),
-                                  [addr](const Block& b) { return b.a == addr; });
-    if (in_result == result.end()) {
+    if (seen.find(addr) == seen.end()) {
       Block b(params_.B, params_.ell + 1);
       b.a = addr;
       b.p[static_cast<size_t>(i_)] = new_path_start + (addr - a);
       result.push_back(b);
+      seen.insert(addr);
     }
   }
 
