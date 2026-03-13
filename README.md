@@ -84,6 +84,60 @@ Use the script below to produce advisor-ready CSVs for multiple media:
 
 For RAM-only runs, omit `--ssd-path` and `--hdd-path`.
 
+## NDSS'19-Style Replication (SSD)
+
+The paper's Section VII evaluates:
+1) query access time (random range queries, synchronous issue)
+2) query throughput (queries/sec) over varying range sizes/workloads
+
+Use this script to reproduce the same style of measurements in this codebase:
+
+```bash
+./scripts/replicate_ndss2019_ssd.sh \
+  --N 4096 --L 256 --trials 5 \
+  --seek-penalty-us 0 \
+  --outdir /tmp/ndss_replica \
+  --backing-prefix /tmp/ndss_replica/device
+
+./scripts/replicate_ndss2019_ssd.sh \
+  --N 4096 --L 256 --trials 5 \
+  --seek-penalty-us 50 \
+  --outdir /tmp/ndss_replica \
+  --backing-prefix /tmp/ndss_replica/device
+```
+
+Outputs:
+- `ndss_access_time_*.csv`: direct benchmark output
+- `ndss_throughput_*.csv`: derived from query latency (`queries/sec`, `MB/s`)
+
+Notes:
+- The paper's full setup uses a 16GB logical database (`2^22` blocks of 4KB) and additional FileBench workloads.
+- For local developer runs, use scaled `N`/`L` to stay within disk limits.
+
+### Throughput Workload Replication (Figure 7-style)
+
+The CLI also supports trace-driven synchronous throughput on one long-lived ORAM instance:
+
+```bash
+./roram_main workload \
+  --mode fileserver \
+  --queries 400 \
+  --N 4096 --L 256 \
+  --seek-penalty-us 50 \
+  --file /tmp/ndss_workload/device \
+  --csv /tmp/ndss_workload/fileserver.csv
+```
+
+To run `sequential`, `fileserver`, and `videoserver` in one shot:
+
+```bash
+./scripts/replicate_ndss2019_workload.sh \
+  --N 4096 --L 256 --queries 400 \
+  --seek-penalty-us 50 \
+  --outdir /tmp/ndss_workload \
+  --backing-prefix /tmp/ndss_workload/device
+```
+
 ## Layout
 
 - **include/roram/** – Headers (types, block, storage, position_map, sub_oram, roram, crypto, bit_reverse)

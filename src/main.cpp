@@ -12,15 +12,19 @@
 #include <cmath>
 #include <string>
 #include <algorithm>
+#include <tuple>
 
 static void usage(const char* prog) {
-  std::cerr << "Usage: " << prog << " <init|read|write|bench|compare> [options]\n"
+  std::cerr << "Usage: " << prog << " <init|read|write|bench|compare|workload> [options]\n"
             << "  init N L [Z] [B]     - init params (N blocks, L max range, Z bucket size, B block bytes)\n"
             << "  read N L a r         - read range [a, a+r) (params N, L)\n"
             << "  write N L a r        - write range [a, a+r) with zeros (params N, L)\n"
             << "  bench N L [trials]   - benchmark range sizes (default 5 trials)\n"
             << "  compare [--N N] [--L L] [--trials T] [--csv path] [--file path] [--seek-penalty-us N]\n"
-            << "          - rORAM vs Path ORAM; use --seek-penalty-us to simulate seek cost (crossover)\n";
+            << "          - rORAM vs Path ORAM; use --seek-penalty-us to simulate seek cost (crossover)\n"
+            << "  workload [--mode sequential|fileserver|videoserver] [--queries Q] [--N N] [--L L]\n"
+            << "           [--seed S] [--seek-penalty-us N] [--file path] [--csv path]\n"
+            << "          - trace-driven synchronous throughput benchmark (queries/sec and MB/s)\n";
 }
 
 // Path ORAM: range read as r sequential Access(addr, "read"). Returns total time in ms.
@@ -30,6 +34,82 @@ static double path_oram_range_read_ms(roram::PathORAM& ram, uint64_t a, uint64_t
     ram.Access(a + i, "read");
   auto end = std::chrono::high_resolution_clock::now();
   return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+static double path_oram_range_write_ms(roram::PathORAM& ram, uint64_t a, uint64_t r,
+                                       const std::vector<std::vector<uint8_t>>& data) {
+  auto start = std::chrono::high_resolution_clock::now();
+  for (uint64_t i = 0; i < r; ++i) {
+    ram.Access(a + i, "write", &data[static_cast<size_t>(i)]);
+  }
+  auto end = std::chrono::high_resolution_clock::now();
+  return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+struct QueryOp {
+  uint64_t a;
+  uint64_t r;
+  bool is_write;
+};
+
+static uint64_t lcg_next(uint64_t& state) {
+  state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+  return state;
+}
+
+static uint64_t clamp_range(uint64_t r, uint64_t L, uint64_t N) {
+  uint64_t out = std::max<uint64_t>(1, r);
+  if (L > 0) out = std::min(out, L);
+  if (N > 0) out = std::min(out, N);
+  return out;
+}
+
+static std::vector<QueryOp> make_workload_trace(uint64_t N, uint64_t L, uint64_t queries,
+                                                const std::string& mode, uint64_t seed) {
+  std::vector<QueryOp> trace;
+  trace.reserve(static_cast<size_t>(queries));
+  if (N == 0) return trace;
+
+  uint64_t cursor = 0;
+  auto next_rand = [&]() { return lcg_next(seed); };
+  for (uint64_t i = 0; i < queries; ++i) {
+    QueryOp q{0, 1, false};
+    uint64_t x = next_rand();
+    if (mode == "videoserver") {
+      static const uint64_t sizes[] = {64, 128, 256, 512};
+      q.r = clamp_range(sizes[x % 4], L, N);
+      q.is_write = false;
+      if (cursor + q.r > N) cursor = 0;
+      q.a = cursor;
+      cursor += q.r;
+    } else if (mode == "fileserver") {
+      static const uint64_t sizes[] = {1, 2, 4, 8, 16, 32, 64};
+      q.r = clamp_range(sizes[x % 7], L, N);
+      q.is_write = ((x >> 8) % 10) < 3;  // ~30% writes
+      if (((x >> 12) % 10) < 7) {
+        if (cursor + q.r > N) cursor = 0;
+        q.a = cursor;
+        cursor += q.r;
+      } else {
+        uint64_t max_start = (N > q.r) ? (N - q.r) : 0;
+        q.a = max_start > 0 ? (next_rand() % max_start) : 0;
+      }
+    } else {  // sequential
+      static const uint64_t sizes[] = {8, 16, 32, 64, 128};
+      q.r = clamp_range(sizes[x % 5], L, N);
+      q.is_write = ((x >> 10) % 20) == 0;  // rare writes (~5%)
+      if (((x >> 14) % 10) < 8) {
+        if (cursor + q.r > N) cursor = 0;
+        q.a = cursor;
+        cursor += q.r;
+      } else {
+        uint64_t max_start = (N > q.r) ? (N - q.r) : 0;
+        q.a = max_start > 0 ? (next_rand() % max_start) : 0;
+      }
+    }
+    trace.push_back(q);
+  }
+  return trace;
 }
 
 static void mean_std_ci(const std::vector<double>& samples, double& mean, double& std_dev, double& ci_low, double& ci_high) {
@@ -237,6 +317,137 @@ static int main_compare(int argc, char** argv) {
   return 0;
 }
 
+static int main_workload(int argc, char** argv) {
+  uint64_t N = 65536;
+  uint64_t L = 8192;
+  uint64_t queries = 1000;
+  uint64_t seed = 0x123456789abcdef0ULL;
+  uint64_t seek_penalty_us = 0;
+  std::string mode = "fileserver";
+  std::string csv_path;
+  std::string file_path;
+  for (int i = 2; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "--N" && i + 1 < argc) { N = std::stoull(argv[++i]); continue; }
+    if (arg == "--L" && i + 1 < argc) { L = std::stoull(argv[++i]); continue; }
+    if (arg == "--queries" && i + 1 < argc) { queries = std::stoull(argv[++i]); continue; }
+    if (arg == "--seed" && i + 1 < argc) { seed = std::stoull(argv[++i]); continue; }
+    if (arg == "--seek-penalty-us" && i + 1 < argc) { seek_penalty_us = std::stoull(argv[++i]); continue; }
+    if (arg == "--mode" && i + 1 < argc) { mode = argv[++i]; continue; }
+    if (arg == "--csv" && i + 1 < argc) { csv_path = argv[++i]; continue; }
+    if (arg == "--file" && i + 1 < argc) { file_path = argv[++i]; continue; }
+  }
+  if (mode != "sequential" && mode != "fileserver" && mode != "videoserver") {
+    throw std::runtime_error("workload: mode must be sequential|fileserver|videoserver");
+  }
+
+  const int Z = 4;
+  const size_t B = 4096;
+  roram::Params params_roram(N, L, Z, B);
+  roram::Params params_path(N, 1, Z, B);
+  const bool use_file = !file_path.empty();
+  const bool count_seeks = use_file;
+  auto trace = make_workload_trace(N, L, queries, mode, seed);
+
+  auto crypto1 = std::make_unique<roram::NoOpCrypto>();
+  auto crypto2 = std::make_unique<roram::NoOpCrypto>();
+  roram::rORAM ram_roram(params_roram, std::move(crypto1), !use_file, use_file ? (file_path + "_roram") : "", count_seeks);
+  roram::PathORAM ram_path(params_path, std::move(crypto2), !use_file, use_file ? (file_path + "_path") : "", count_seeks);
+
+  uint64_t logical_bytes = 0;
+  for (const auto& q : trace) logical_bytes += q.r * static_cast<uint64_t>(B);
+
+  auto run_roram = [&]() {
+    std::vector<double> per_query_ms;
+    per_query_ms.reserve(trace.size());
+    uint64_t seek_total = 0;
+    for (const auto& q : trace) {
+      uint64_t seek_before = ram_roram.get_seek_count();
+      auto start = std::chrono::high_resolution_clock::now();
+      if (q.is_write) {
+        std::vector<std::vector<uint8_t>> d(q.r, std::vector<uint8_t>(B, 0));
+        ram_roram.Access(q.a, q.r, "write", &d);
+      } else {
+        ram_roram.Access(q.a, q.r, "read");
+      }
+      auto end = std::chrono::high_resolution_clock::now();
+      uint64_t seek_after = ram_roram.get_seek_count();
+      seek_total += (seek_after - seek_before);
+      double ms = std::chrono::duration<double, std::milli>(end - start).count();
+      ms += (seek_penalty_us > 0 ? (seek_after - seek_before) * (seek_penalty_us / 1000.0) : 0.0);
+      per_query_ms.push_back(ms);
+    }
+    double mean, stddev, ci_lo, ci_hi;
+    mean_std_ci(per_query_ms, mean, stddev, ci_lo, ci_hi);
+    return std::tuple<double, double, double, double, double, uint64_t>(
+        mean, percentile(per_query_ms, 0.50), percentile(per_query_ms, 0.95), ci_lo, ci_hi, seek_total);
+  };
+
+  auto run_path = [&]() {
+    std::vector<double> per_query_ms;
+    per_query_ms.reserve(trace.size());
+    uint64_t seek_total = 0;
+    for (const auto& q : trace) {
+      uint64_t seek_before = ram_path.get_seek_count();
+      double ms = 0.0;
+      if (q.is_write) {
+        std::vector<std::vector<uint8_t>> d(q.r, std::vector<uint8_t>(B, 0));
+        ms = path_oram_range_write_ms(ram_path, q.a, q.r, d);
+      } else {
+        ms = path_oram_range_read_ms(ram_path, q.a, q.r);
+      }
+      uint64_t seek_after = ram_path.get_seek_count();
+      seek_total += (seek_after - seek_before);
+      ms += (seek_penalty_us > 0 ? (seek_after - seek_before) * (seek_penalty_us / 1000.0) : 0.0);
+      per_query_ms.push_back(ms);
+    }
+    double mean, stddev, ci_lo, ci_hi;
+    mean_std_ci(per_query_ms, mean, stddev, ci_lo, ci_hi);
+    return std::tuple<double, double, double, double, double, uint64_t>(
+        mean, percentile(per_query_ms, 0.50), percentile(per_query_ms, 0.95), ci_lo, ci_hi, seek_total);
+  };
+
+  auto [mean_r, p50_r, p95_r, ci_lo_r, ci_hi_r, seeks_r] = run_roram();
+  auto [mean_p, p50_p, p95_p, ci_lo_p, ci_hi_p, seeks_p] = run_path();
+
+  auto qps = [](double mean_ms) { return mean_ms > 0 ? (1000.0 / mean_ms) : 0.0; };
+  auto mbps = [logical_bytes](double mean_ms) {
+    return mean_ms > 0 ? ((logical_bytes / 1048576.0) / (mean_ms / 1000.0)) : 0.0;
+  };
+
+  std::cout << "Workload throughput benchmark  mode=" << mode << " queries=" << queries
+            << " N=" << N << " L=" << L;
+  if (seek_penalty_us) std::cout << " seek_penalty_us=" << seek_penalty_us;
+  std::cout << "\n";
+  std::cout << std::string(132, '-') << "\n";
+  std::cout << std::setw(12) << "scheme" << std::setw(12) << "mean_ms" << std::setw(12) << "p50_ms"
+            << std::setw(12) << "p95_ms" << std::setw(14) << "qps" << std::setw(14) << "mbps"
+            << std::setw(14) << "mean_seeks" << std::setw(12) << "ci_low" << std::setw(12) << "ci_high" << "\n";
+  std::cout << std::string(132, '-') << "\n";
+  std::cout << std::fixed << std::setprecision(3)
+            << std::setw(12) << "rORAM" << std::setw(12) << mean_r << std::setw(12) << p50_r
+            << std::setw(12) << p95_r << std::setw(14) << qps(mean_r) << std::setw(14) << mbps(mean_r)
+            << std::setw(14) << (queries > 0 ? (seeks_r / queries) : 0) << std::setw(12) << ci_lo_r << std::setw(12) << ci_hi_r << "\n";
+  std::cout << std::setw(12) << "PathORAM" << std::setw(12) << mean_p << std::setw(12) << p50_p
+            << std::setw(12) << p95_p << std::setw(14) << qps(mean_p) << std::setw(14) << mbps(mean_p)
+            << std::setw(14) << (queries > 0 ? (seeks_p / queries) : 0) << std::setw(12) << ci_lo_p << std::setw(12) << ci_hi_p << "\n";
+
+  if (!csv_path.empty()) {
+    std::ofstream csv(csv_path);
+    if (csv) {
+      csv << "scheme,mode,queries,N,L,mean_ms,p50_ms,p95_ms,queries_per_sec,mb_per_sec,mean_seeks,ci_low,ci_high\n";
+      csv << "rORAM," << mode << "," << queries << "," << N << "," << L << "," << mean_r << "," << p50_r << "," << p95_r
+          << "," << qps(mean_r) << "," << mbps(mean_r) << "," << (queries > 0 ? (seeks_r / queries) : 0)
+          << "," << ci_lo_r << "," << ci_hi_r << "\n";
+      csv << "PathORAM," << mode << "," << queries << "," << N << "," << L << "," << mean_p << "," << p50_p << "," << p95_p
+          << "," << qps(mean_p) << "," << mbps(mean_p) << "," << (queries > 0 ? (seeks_p / queries) : 0)
+          << "," << ci_lo_p << "," << ci_hi_p << "\n";
+      std::cout << "Wrote " << csv_path << "\n";
+    }
+  }
+  return 0;
+}
+
 int main(int argc, char** argv) {
   if (argc < 2) { usage(argv[0]); return 1; }
   std::string cmd = argv[1];
@@ -245,6 +456,7 @@ int main(int argc, char** argv) {
   if (cmd == "read") return main_read(argc, argv);
   if (cmd == "write") return main_write(argc, argv);
   if (cmd == "compare") return main_compare(argc, argv);
+  if (cmd == "workload") return main_workload(argc, argv);
   usage(argv[0]);
   return 1;
 }
