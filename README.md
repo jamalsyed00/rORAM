@@ -106,6 +106,17 @@ Use this script to reproduce the same style of measurements in this codebase:
   --backing-prefix /tmp/ndss_replica/device
 ```
 
+To approximate the paper's recursive-PM Path ORAM baseline:
+
+```bash
+./scripts/replicate_ndss2019_ssd.sh \
+  --N 4096 --L 256 --trials 5 \
+  --seek-penalty-us 50 \
+  --path-recursive-pm \
+  --outdir /tmp/ndss_replica \
+  --backing-prefix /tmp/ndss_replica/device
+```
+
 Outputs:
 - `ndss_access_time_*.csv`: direct benchmark output
 - `ndss_throughput_*.csv`: derived from query latency (`queries/sec`, `MB/s`)
@@ -134,8 +145,39 @@ To run `sequential`, `fileserver`, and `videoserver` in one shot:
 ./scripts/replicate_ndss2019_workload.sh \
   --N 4096 --L 256 --queries 400 \
   --seek-penalty-us 50 \
+  --path-recursive-pm \
   --outdir /tmp/ndss_workload \
   --backing-prefix /tmp/ndss_workload/device
+```
+
+### Real Trace Replay (FileBench-style export)
+
+If you have a trace export, replay it directly:
+
+```bash
+./scripts/replay_trace_workload.sh \
+  --trace /path/to/trace.csv \
+  --N 65536 --L 8192 \
+  --seek-penalty-us 50 \
+  --backing-prefix /tmp/trace_replay/device \
+  --csv /tmp/trace_replay/results.csv
+```
+
+Trace format:
+
+```csv
+op,a,r
+read,123,8
+write,456,4
+```
+
+### Larger-Scale SSD Runs
+
+```bash
+./scripts/replicate_ndss2019_largescale_ssd.sh \
+  --outdir /tmp/ndss_largescale \
+  --backing-prefix /tmp/ndss_largescale/device \
+  --seek-penalty-us 50
 ```
 
 ## Layout

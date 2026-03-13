@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -292,9 +293,19 @@ static void test_cli_smoke() {
   int rc1 = std::system("./roram_main read 16 8 0 1 >/dev/null");
   int rc2 = std::system("./roram_main write 16 8 0 1 >/dev/null");
   int rc3 = std::system("./roram_main compare --N 16 --L 8 --trials 1 >/dev/null");
+  std::string trace = "/tmp/roram_workload_trace.csv";
+  {
+    std::ofstream out(trace);
+    out << "op,a,r\n";
+    out << "read,0,1\n";
+    out << "write,4,2\n";
+    out << "read,4,2\n";
+  }
+  int rc4 = std::system("./roram_main workload --N 16 --L 8 --trace /tmp/roram_workload_trace.csv --csv /tmp/roram_workload_trace_out.csv >/dev/null");
   assert(rc1 == 0);
   assert(rc2 == 0);
   assert(rc3 == 0);
+  assert(rc4 == 0);
 }
 
 static void test_noop_encrypt_roundtrip() {

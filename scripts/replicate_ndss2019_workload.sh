@@ -9,6 +9,8 @@ SEEK_PENALTY_US=0
 OUTDIR="/tmp/ndss_workload"
 BACKING_PREFIX="/tmp/ndss_workload/device"
 CLEANUP_BACKING=1
+PATH_RECURSIVE_PM=0
+PATH_PM_ACCESSES=0
 
 usage() {
   cat <<EOF
@@ -30,6 +32,8 @@ Options:
   --seek-penalty-us <num>   Per-seek delay model (default: ${SEEK_PENALTY_US})
   --outdir <dir>            Output directory (default: ${OUTDIR})
   --backing-prefix <path>   File-backed ORAM prefix (default: ${BACKING_PREFIX})
+  --path-recursive-pm       Enable recursive-PM-style Path ORAM baseline emulation
+  --path-pm-accesses <num>  Override PM accesses per Path data access (default: auto)
   --no-cleanup              Keep backing files after each run
   -h|--help                 Show this message
 EOF
@@ -44,6 +48,8 @@ while [[ $# -gt 0 ]]; do
     --seek-penalty-us) SEEK_PENALTY_US="$2"; shift 2 ;;
     --outdir) OUTDIR="$2"; shift 2 ;;
     --backing-prefix) BACKING_PREFIX="$2"; shift 2 ;;
+    --path-recursive-pm) PATH_RECURSIVE_PM=1; shift ;;
+    --path-pm-accesses) PATH_PM_ACCESSES="$2"; shift 2 ;;
     --no-cleanup) CLEANUP_BACKING=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -71,7 +77,9 @@ for mode in sequential fileserver videoserver; do
     --L "$L" \
     --seek-penalty-us "$SEEK_PENALTY_US" \
     --file "$BACKING_PREFIX" \
-    --csv "$out_csv" | tee "$out_txt"
+    --csv "$out_csv" \
+    $( [[ "$PATH_RECURSIVE_PM" -eq 1 ]] && printf -- "--path-recursive-pm" ) \
+    $( [[ "$PATH_PM_ACCESSES" -gt 0 ]] && printf -- "--path-pm-accesses %s" "$PATH_PM_ACCESSES" ) | tee "$out_txt"
   tail -n +2 "$out_csv" >> "$summary"
   if [[ "$CLEANUP_BACKING" -eq 1 ]]; then
     rm -f "${BACKING_PREFIX}"*

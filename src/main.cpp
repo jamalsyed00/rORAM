@@ -13,6 +13,7 @@
 #include <string>
 #include <algorithm>
 #include <tuple>
+#include <sstream>
 
 static void usage(const char* prog) {
   std::cerr << "Usage: " << prog << " <init|read|write|bench|compare|workload> [options]\n"
@@ -21,26 +22,43 @@ static void usage(const char* prog) {
             << "  write N L a r        - write range [a, a+r) with zeros (params N, L)\n"
             << "  bench N L [trials]   - benchmark range sizes (default 5 trials)\n"
             << "  compare [--N N] [--L L] [--trials T] [--csv path] [--file path] [--seek-penalty-us N]\n"
+            << "          [--path-recursive-pm] [--path-pm-accesses K]\n"
             << "          - rORAM vs Path ORAM; use --seek-penalty-us to simulate seek cost (crossover)\n"
             << "  workload [--mode sequential|fileserver|videoserver] [--queries Q] [--N N] [--L L]\n"
-            << "           [--seed S] [--seek-penalty-us N] [--file path] [--csv path]\n"
+            << "           [--seed S] [--seek-penalty-us N] [--file path] [--csv path] [--trace path]\n"
+            << "           [--path-recursive-pm] [--path-pm-accesses K]\n"
             << "          - trace-driven synchronous throughput benchmark (queries/sec and MB/s)\n";
 }
 
 // Path ORAM: range read as r sequential Access(addr, "read"). Returns total time in ms.
-static double path_oram_range_read_ms(roram::PathORAM& ram, uint64_t a, uint64_t r) {
+static double path_oram_range_read_ms(roram::PathORAM& ram, uint64_t a, uint64_t r,
+                                      roram::PathORAM* pm_oram = nullptr,
+                                      uint64_t pm_accesses_per_data = 0) {
   auto start = std::chrono::high_resolution_clock::now();
-  for (uint64_t i = 0; i < r; ++i)
+  for (uint64_t i = 0; i < r; ++i) {
     ram.Access(a + i, "read");
+    if (pm_oram && pm_accesses_per_data > 0) {
+      for (uint64_t k = 0; k < pm_accesses_per_data; ++k) {
+        pm_oram->Access((a + i + k) % (1ULL << 20), "read");
+      }
+    }
+  }
   auto end = std::chrono::high_resolution_clock::now();
   return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
 static double path_oram_range_write_ms(roram::PathORAM& ram, uint64_t a, uint64_t r,
-                                       const std::vector<std::vector<uint8_t>>& data) {
+                                       const std::vector<std::vector<uint8_t>>& data,
+                                       roram::PathORAM* pm_oram = nullptr,
+                                       uint64_t pm_accesses_per_data = 0) {
   auto start = std::chrono::high_resolution_clock::now();
   for (uint64_t i = 0; i < r; ++i) {
     ram.Access(a + i, "write", &data[static_cast<size_t>(i)]);
+    if (pm_oram && pm_accesses_per_data > 0) {
+      for (uint64_t k = 0; k < pm_accesses_per_data; ++k) {
+        pm_oram->Access((a + i + k) % (1ULL << 20), "read");
+      }
+    }
   }
   auto end = std::chrono::high_resolution_clock::now();
   return std::chrono::duration<double, std::milli>(end - start).count();
@@ -109,6 +127,36 @@ static std::vector<QueryOp> make_workload_trace(uint64_t N, uint64_t L, uint64_t
     }
     trace.push_back(q);
   }
+  return trace;
+}
+
+static std::vector<QueryOp> load_trace_csv(const std::string& path, uint64_t N, uint64_t L) {
+  std::ifstream in(path);
+  if (!in) throw std::runtime_error("workload: failed to open trace file: " + path);
+  std::vector<QueryOp> trace;
+  std::string line;
+  uint64_t lineno = 0;
+  while (std::getline(in, line)) {
+    ++lineno;
+    if (line.empty()) continue;
+    if (line[0] == '#') continue;
+    std::stringstream ss(line);
+    std::string op_s, a_s, r_s;
+    if (!std::getline(ss, op_s, ',')) continue;
+    if (!std::getline(ss, a_s, ',')) throw std::runtime_error("workload trace parse error at line " + std::to_string(lineno));
+    if (!std::getline(ss, r_s, ',')) throw std::runtime_error("workload trace parse error at line " + std::to_string(lineno));
+    // Accept an optional CSV header.
+    if (lineno == 1 && (op_s == "op" || op_s == "OP")) continue;
+    uint64_t a = std::stoull(a_s);
+    uint64_t r = std::stoull(r_s);
+    bool is_write = (op_s == "w" || op_s == "W" || op_s == "write" || op_s == "WRITE");
+    bool is_read = (op_s == "r" || op_s == "R" || op_s == "read" || op_s == "READ");
+    if (!is_write && !is_read) throw std::runtime_error("workload trace invalid op at line " + std::to_string(lineno));
+    if (r == 0 || r > L) throw std::runtime_error("workload trace invalid range at line " + std::to_string(lineno));
+    if (a + r > N) throw std::runtime_error("workload trace out of bounds at line " + std::to_string(lineno));
+    trace.push_back(QueryOp{a, r, is_write});
+  }
+  if (trace.empty()) throw std::runtime_error("workload: empty trace file: " + path);
   return trace;
 }
 
@@ -213,6 +261,8 @@ static int main_compare(int argc, char** argv) {
   uint64_t L = 8192;
   int trials = 5;
   uint64_t seek_penalty_us = 0;
+  bool path_recursive_pm = false;
+  uint64_t path_pm_accesses = 0;
   std::string csv_path;
   std::string file_path;
   for (int i = 2; i < argc; ++i) {
@@ -221,6 +271,8 @@ static int main_compare(int argc, char** argv) {
     if (arg == "--L" && i + 1 < argc) { L = std::stoull(argv[++i]); continue; }
     if (arg == "--trials" && i + 1 < argc) { trials = std::stoi(argv[++i]); continue; }
     if (arg == "--seek-penalty-us" && i + 1 < argc) { seek_penalty_us = std::stoull(argv[++i]); continue; }
+    if (arg == "--path-recursive-pm") { path_recursive_pm = true; continue; }
+    if (arg == "--path-pm-accesses" && i + 1 < argc) { path_pm_accesses = std::stoull(argv[++i]); continue; }
     if (arg == "--csv" && i + 1 < argc) { csv_path = argv[++i]; continue; }
     if (arg == "--file" && i + 1 < argc) { file_path = argv[++i]; continue; }
   }
@@ -232,8 +284,16 @@ static int main_compare(int argc, char** argv) {
   const bool count_seeks = use_file;  // enable seek counting when using file storage
   auto crypto1 = std::make_unique<roram::NoOpCrypto>();
   auto crypto2 = std::make_unique<roram::NoOpCrypto>();
+  auto crypto_pm = std::make_unique<roram::NoOpCrypto>();
   roram::rORAM ram_roram(params_roram, std::move(crypto1), !use_file, use_file ? (file_path + "_roram") : "", count_seeks);
   roram::PathORAM ram_path(params_path, std::move(crypto2), !use_file, use_file ? (file_path + "_path") : "", count_seeks);
+  std::unique_ptr<roram::PathORAM> ram_path_pm;
+  if (path_recursive_pm) {
+    if (path_pm_accesses == 0) path_pm_accesses = static_cast<uint64_t>(2 * (params_path.h + 1));
+    roram::Params params_pm(1ULL << 20, 1, Z, 64);
+    ram_path_pm = std::make_unique<roram::PathORAM>(params_pm, std::move(crypto_pm), !use_file,
+                                                     use_file ? (file_path + "_pathpm") : "", count_seeks);
+  }
 
   const int max_exp = std::min(params_roram.ell, 14);
   std::cout << "Compare rORAM vs Path ORAM  N=" << N << " L=" << L << " trials=" << trials;
@@ -276,8 +336,10 @@ static int main_compare(int argc, char** argv) {
       seeks_roram.push_back(seek_after_r - seek_before_r);
 
       uint64_t seek_before_p = ram_path.get_seek_count();
-      double elapsed_p = path_oram_range_read_ms(ram_path, a, r_size);
+      if (ram_path_pm) seek_before_p += ram_path_pm->get_seek_count();
+      double elapsed_p = path_oram_range_read_ms(ram_path, a, r_size, ram_path_pm.get(), path_pm_accesses);
       uint64_t seek_after_p = ram_path.get_seek_count();
+      if (ram_path_pm) seek_after_p += ram_path_pm->get_seek_count();
       double reported_p = elapsed_p + (seek_penalty_us > 0 ? (seek_after_p - seek_before_p) * (seek_penalty_us / 1000.0) : 0);
       times_path.push_back(reported_p);
       seeks_path.push_back(seek_after_p - seek_before_p);
@@ -323,7 +385,10 @@ static int main_workload(int argc, char** argv) {
   uint64_t queries = 1000;
   uint64_t seed = 0x123456789abcdef0ULL;
   uint64_t seek_penalty_us = 0;
+  bool path_recursive_pm = false;
+  uint64_t path_pm_accesses = 0;
   std::string mode = "fileserver";
+  std::string trace_path;
   std::string csv_path;
   std::string file_path;
   for (int i = 2; i < argc; ++i) {
@@ -333,7 +398,10 @@ static int main_workload(int argc, char** argv) {
     if (arg == "--queries" && i + 1 < argc) { queries = std::stoull(argv[++i]); continue; }
     if (arg == "--seed" && i + 1 < argc) { seed = std::stoull(argv[++i]); continue; }
     if (arg == "--seek-penalty-us" && i + 1 < argc) { seek_penalty_us = std::stoull(argv[++i]); continue; }
+    if (arg == "--path-recursive-pm") { path_recursive_pm = true; continue; }
+    if (arg == "--path-pm-accesses" && i + 1 < argc) { path_pm_accesses = std::stoull(argv[++i]); continue; }
     if (arg == "--mode" && i + 1 < argc) { mode = argv[++i]; continue; }
+    if (arg == "--trace" && i + 1 < argc) { trace_path = argv[++i]; continue; }
     if (arg == "--csv" && i + 1 < argc) { csv_path = argv[++i]; continue; }
     if (arg == "--file" && i + 1 < argc) { file_path = argv[++i]; continue; }
   }
@@ -347,12 +415,22 @@ static int main_workload(int argc, char** argv) {
   roram::Params params_path(N, 1, Z, B);
   const bool use_file = !file_path.empty();
   const bool count_seeks = use_file;
-  auto trace = make_workload_trace(N, L, queries, mode, seed);
+  auto trace = trace_path.empty() ? make_workload_trace(N, L, queries, mode, seed)
+                                  : load_trace_csv(trace_path, N, L);
+  queries = static_cast<uint64_t>(trace.size());
 
   auto crypto1 = std::make_unique<roram::NoOpCrypto>();
   auto crypto2 = std::make_unique<roram::NoOpCrypto>();
+  auto crypto_pm = std::make_unique<roram::NoOpCrypto>();
   roram::rORAM ram_roram(params_roram, std::move(crypto1), !use_file, use_file ? (file_path + "_roram") : "", count_seeks);
   roram::PathORAM ram_path(params_path, std::move(crypto2), !use_file, use_file ? (file_path + "_path") : "", count_seeks);
+  std::unique_ptr<roram::PathORAM> ram_path_pm;
+  if (path_recursive_pm) {
+    if (path_pm_accesses == 0) path_pm_accesses = static_cast<uint64_t>(2 * (params_path.h + 1));
+    roram::Params params_pm(1ULL << 20, 1, Z, 64);
+    ram_path_pm = std::make_unique<roram::PathORAM>(params_pm, std::move(crypto_pm), !use_file,
+                                                     use_file ? (file_path + "_pathpm") : "", count_seeks);
+  }
 
   uint64_t logical_bytes = 0;
   for (const auto& q : trace) logical_bytes += q.r * static_cast<uint64_t>(B);
@@ -389,14 +467,16 @@ static int main_workload(int argc, char** argv) {
     uint64_t seek_total = 0;
     for (const auto& q : trace) {
       uint64_t seek_before = ram_path.get_seek_count();
+      if (ram_path_pm) seek_before += ram_path_pm->get_seek_count();
       double ms = 0.0;
       if (q.is_write) {
         std::vector<std::vector<uint8_t>> d(q.r, std::vector<uint8_t>(B, 0));
-        ms = path_oram_range_write_ms(ram_path, q.a, q.r, d);
+        ms = path_oram_range_write_ms(ram_path, q.a, q.r, d, ram_path_pm.get(), path_pm_accesses);
       } else {
-        ms = path_oram_range_read_ms(ram_path, q.a, q.r);
+        ms = path_oram_range_read_ms(ram_path, q.a, q.r, ram_path_pm.get(), path_pm_accesses);
       }
       uint64_t seek_after = ram_path.get_seek_count();
+      if (ram_path_pm) seek_after += ram_path_pm->get_seek_count();
       seek_total += (seek_after - seek_before);
       ms += (seek_penalty_us > 0 ? (seek_after - seek_before) * (seek_penalty_us / 1000.0) : 0.0);
       per_query_ms.push_back(ms);
@@ -417,6 +497,7 @@ static int main_workload(int argc, char** argv) {
 
   std::cout << "Workload throughput benchmark  mode=" << mode << " queries=" << queries
             << " N=" << N << " L=" << L;
+  if (!trace_path.empty()) std::cout << " trace=" << trace_path;
   if (seek_penalty_us) std::cout << " seek_penalty_us=" << seek_penalty_us;
   std::cout << "\n";
   std::cout << std::string(132, '-') << "\n";
