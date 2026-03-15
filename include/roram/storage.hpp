@@ -42,6 +42,10 @@ class MemoryStorage : public StorageBackend {
   std::vector<std::vector<uint8_t>> level_data_;
   mutable uint64_t seek_count_{0};
   mutable uint64_t last_offset_{static_cast<uint64_t>(-1)};  // byte after last request
+  // Opt 2: precomputed level byte offsets — avoids O(h) sum on every read/write.
+  std::vector<uint64_t> level_offsets_;
+  // Opt 4: reusable scratch buffer — eliminates per-bucket heap allocation in read_buckets.
+  mutable std::vector<uint8_t> scratch_;
   uint64_t level_offset(int j) const;
 };
 

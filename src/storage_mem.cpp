@@ -4,10 +4,8 @@
 namespace roram {
 
 uint64_t MemoryStorage::level_offset(int j) const {
-  uint64_t off = 0;
-  for (int i = 0; i < j; ++i)
-    off += (1ULL << i) * bucket_storage_size_;
-  return off;
+  // Opt 2: O(1) lookup via precomputed table (replaces O(h) loop).
+  return level_offsets_[static_cast<size_t>(j)];
 }
 
 MemoryStorage::MemoryStorage(const Params& params, CryptoProvider* crypto)
@@ -15,11 +13,19 @@ MemoryStorage::MemoryStorage(const Params& params, CryptoProvider* crypto)
   Bucket b(params.Z, params.B, params.ell + 1);
   bucket_plain_size_ = b.serialized_size(params_);
   bucket_storage_size_ = bucket_plain_size_ + tag_size_;
+  // Opt 2: precompute cumulative byte offsets for each level.
+  // level_offsets_[j] = sum_{k=0}^{j-1} 2^k * bucket_storage_size_ = (2^j - 1) * bucket_storage_size_
+  level_offsets_.resize(static_cast<size_t>(params_.h + 2), 0);
+  for (int j = 1; j <= params_.h + 1; ++j)
+    level_offsets_[static_cast<size_t>(j)] =
+        level_offsets_[static_cast<size_t>(j - 1)] + (1ULL << (j - 1)) * bucket_storage_size_;
   level_data_.resize(static_cast<size_t>(params_.h + 1));
   for (int j = 0; j <= params_.h; ++j) {
     uint64_t num_buckets = 1ULL << j;
     level_data_[static_cast<size_t>(j)].resize(num_buckets * bucket_storage_size_, 0);
   }
+  // Opt 4: allocate scratch buffer once; reused for every bucket read.
+  scratch_.resize(bucket_storage_size_, 0);
 }
 
 void MemoryStorage::read_buckets(int level, uint64_t start_bucket, uint64_t count,
@@ -35,9 +41,9 @@ void MemoryStorage::read_buckets(int level, uint64_t start_bucket, uint64_t coun
   for (uint64_t i = 0; i < count; ++i) {
     size_t pos = (start_bucket + i) * bucket_storage_size_;
     if (pos + bucket_storage_size_ > data.size()) break;
-    std::vector<uint8_t> bucket_buf(bucket_storage_size_, 0);
-    std::memcpy(bucket_buf.data(), data.data() + pos, bucket_storage_size_);
-    uint8_t* bucket_ptr = bucket_buf.data();
+    // Opt 4: reuse pre-allocated scratch buffer; no heap alloc per bucket.
+    std::memcpy(scratch_.data(), data.data() + pos, bucket_storage_size_);
+    uint8_t* bucket_ptr = scratch_.data();
     uint64_t bucket_id = ((1ULL << level) - 1) + start_bucket + i;
     if (crypto_) crypto_->decrypt(bucket_ptr, bucket_plain_size_, bucket_id, bucket_ptr + bucket_plain_size_);
     out[i].deserialize(bucket_ptr, params_);

@@ -19,18 +19,16 @@ Params::Params(uint64_t n, uint64_t l, int z, size_t b)
 }
 
 int Params::range_exponent(uint64_t r) {
-  if (r == 0) return 0;
-  int i = 0;
-  uint64_t p = 1;
-  while (p < r) { p *= 2; ++i; }
-  return i;
+  // Opt 3: O(1) via count-leading-zeros (replaces O(log r) loop).
+  // Returns ceil(log2(r)), i.e. the smallest i such that 2^i >= r.
+  if (r <= 1) return 0;
+  return 64 - __builtin_clzll(r - 1);
 }
 
 uint64_t Params::range_power2(uint64_t r) {
-  if (r == 0) return 1;
-  uint64_t p = 1;
-  while (p < r) p *= 2;
-  return p;
+  // Opt 3: O(1) via bit shift from exponent.
+  if (r <= 1) return 1;
+  return 1ULL << (64 - __builtin_clzll(r - 1));
 }
 
 }  // namespace roram
